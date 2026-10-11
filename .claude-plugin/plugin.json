@@ -1,0 +1,11 @@
+{
+  "name": "wechat",
+  "description": "Download WeChat Official Account (mp.weixin.qq.com) articles as Markdown, with optional offline HTML and images.",
+  "version": "0.1.0",
+  "homepage": "https://github.com/kouui/wechat-claude-plugin",
+  "repository": "https://github.com/kouui/wechat-claude-plugin",
+  "author": {
+    "name": "kouui"
+  },
+  "keywords": ["wechat", "weixin", "article", "markdown", "download"]
+}

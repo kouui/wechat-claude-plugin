@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "wechat-claude-plugin",
+  "description": "Claude Code plugins for WeChat: download Official Account articles as Markdown.",
+  "owner": {
+    "name": "kouui"
+  },
+  "plugins": [
+    {
+      "name": "wechat",
+      "description": "Download WeChat Official Account (mp.weixin.qq.com) articles as Markdown, with optional offline HTML and images.",
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://github.com/kouui/wechat-claude-plugin"
+    }
+  ]
+}
