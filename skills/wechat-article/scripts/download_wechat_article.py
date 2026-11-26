@@ -23,6 +23,11 @@
     额外产出 index.html 与 images/,图片下载到本地并改写为相对路径。
     整篇下来体积是纯文本的几十倍,只在需要离线阅读时用。
 
+图片消息(轮播图帖子,页面里没有 #js_content):
+    正文在图片里。index.md 只有帖子的简短文字和按顺序排列的图片,
+    meta.json 里 type 为 "picture",image_count 为图片张数。
+    需要文字时再对图片做 OCR。
+
 依赖由上方 PEP 723 内联元数据声明,uv 自动装到临时环境,与项目环境隔离。
 """
 
@@ -31,6 +36,7 @@
 
 import argparse
 import hashlib
+import html as htmllib
 import json
 from pathlib import Path
 import re
@@ -67,10 +73,117 @@ def fetch_html(url, retries=3):
             raise RuntimeError("触发微信环境校验,请更换 IP 或降低抓取频率")
         if "该内容已被发布者删除" in html or "此内容因违规无法查看" in html:
             raise RuntimeError("文章已被删除或违规下架")
-        if 'id="js_content"' in html or 'id="js_article"' in html:
+        if 'id="js_content"' in html or 'id="js_article"' in html or PICTURE_LIST_KEY in html:
             return html
         time.sleep(2 * (i + 1))
     raise RuntimeError("未能取到正文,页面结构可能已变化")
+
+
+PICTURE_LIST_KEY = "picture_page_info_list: ["
+
+
+JS_ESCAPE_RE = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)", re.S)
+JS_SIMPLE_ESCAPES = {"n": "\n", "r": "", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+
+
+def js_unescape(s):
+    """还原内联 JS 单引号字符串里的转义(\\xHH / \\uHHHH / \\n / \\' 等)
+
+    每个转义只解码一次,所以 \\x5cn 得到的是反斜杠加 n,不会再被当成换行。
+    \\uD83D\\uDE00 这样的 UTF-16 代理对会合成一个字符(😀),
+    否则写 UTF-8 文件时会因孤立代理字符报 UnicodeEncodeError。
+    """
+
+    def one(m):
+        e = m.group(1)
+        if e[0] in "xu" and len(e) > 1:
+            return chr(int(e[1:], 16))
+        return JS_SIMPLE_ESCAPES.get(e, e)
+
+    s = JS_ESCAPE_RE.sub(one, s)
+    # 合成代理对;残留的孤立代理字符换成 U+FFFD
+    return s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def js_str(html, key):
+    """取内联 JS 里第一个 `key: '...'` 的值"""
+    m = re.search(rf"\b{key}:\s*'((?:[^'\\]|\\.)*)'", html)
+    return js_unescape(m.group(1)) if m else ""
+
+
+def parse_picture_urls(html):
+    """图片消息: 按顺序取 picture_page_info_list 每一项自己的 cdn_url。
+
+    每一项里还嵌着 share_cover / watermark_info / original_info 等对象,
+    它们也有 cdn_url(分享封面、水印、原图链接),不能当正文图片。
+    所以按括号层级只取第 2 层(列表 → 项)上的 cdn_url。
+    """
+    i = html.find(PICTURE_LIST_KEY)
+    if i < 0:
+        return []
+    k = i + len(PICTURE_LIST_KEY) - 1  # 指向 '['
+    depth, urls, item_url = 0, [], None
+    key_re = re.compile(r"cdn_url:\s*'((?:[^'\\]|\\.)*)'")
+    while k < len(html):
+        c = html[k]
+        if c == "'":  # 跳过字符串,避免里面的括号干扰层级
+            k += 1
+            while k < len(html) and html[k] != "'":
+                k += 2 if html[k] == "\\" else 1
+        elif c in "[{":
+            depth += 1
+            if depth == 2:
+                item_url = None
+        elif c in "]}":
+            if depth == 2 and item_url:
+                urls.append(item_url)
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 2 and item_url is None:
+            m = key_re.match(html, k)
+            if m:
+                item_url = htmllib.unescape(js_unescape(m.group(1)))
+                k = m.end()
+                continue
+        k += 1
+    return urls
+
+
+def build_picture_content(soup, html, meta):
+    """把图片消息拼成和普通文章一样的正文容器,后面的流程可以复用"""
+    urls = parse_picture_urls(html)
+    if not urls:
+        raise RuntimeError("图片消息里找不到图片列表,页面结构可能已变化")
+    text = js_str(html, "content_noencode")
+    # 帖子文字里带话题链接等 HTML,只留纯文本
+    text = BeautifulSoup(htmllib.unescape(text), "html.parser").get_text(" ")
+    text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()).strip()
+    if not meta["account"]:
+        meta["account"] = js_str(html, "nick_name")
+    if not meta["publish_time"]:
+        m = re.search(r"create_time:\s*'(\d{10})'", html)
+        if m:
+            meta["publish_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(m.group(1))))
+    if text:
+        meta["digest"] = text
+    meta["type"] = "picture"
+    meta["image_count"] = len(urls)
+
+    content = soup.new_tag("div")
+    note = soup.new_tag("p")
+    note.string = f"(图片消息,正文在下面 {len(urls)} 张图片里)"
+    content.append(note)
+    for line in text.splitlines():
+        if line.strip():
+            p = soup.new_tag("p")
+            p.string = line.strip()
+            content.append(p)
+    for u in urls:
+        p = soup.new_tag("p")
+        p.append(soup.new_tag("img", attrs={"data-src": u}))
+        content.append(p)
+    return content
 
 
 def parse_meta(soup, url):
@@ -96,14 +209,19 @@ def parse_meta(soup, url):
         "publish_time": publish_time,
         "digest": pick('meta[name="description"]', 'meta[property="og:description"]'),
         "url": url,
+        "type": "article",
     }
 
 
-def localize_images(content, img_dir: Path, rel_prefix="images"):
-    """下载正文里的图片并把 src 改成本地相对路径"""
+def localize_images(content, img_dir: Path, rel_prefix="images", numbered=False):
+    """下载正文里的图片并把 src 改成本地相对路径
+
+    numbered=True 时按出现顺序命名为 01.jpg、02.jpg …(图片消息用,方便按顺序 OCR);
+    否则用 URL 的哈希命名。
+    """
     img_dir.mkdir(parents=True, exist_ok=True)
     count = 0
-    for img in content.find_all("img"):
+    for idx, img in enumerate(content.find_all("img"), 1):
         # 关键:真实地址在 data-src 上,src 往往是占位图
         src = img.get("data-src") or img.get("src")
         if not src or src.startswith("data:"):
@@ -113,6 +231,9 @@ def localize_images(content, img_dir: Path, rel_prefix="images"):
             r.raise_for_status()
         except Exception as e:
             print(f"  [warn] 图片下载失败 {src[:60]}... ({e})", file=sys.stderr)
+            # 保留远程地址:离线 HTML 没有懒加载 JS,只有 data-src 的图片显示不出来
+            img["src"] = src
+            img.attrs.pop("data-src", None)
             continue
 
         # 从 wx_fmt 参数或 Content-Type 推断扩展名
@@ -125,7 +246,10 @@ def localize_images(content, img_dir: Path, rel_prefix="images"):
         elif "gif" in r.headers.get("Content-Type", ""):
             ext = "gif"
 
-        name = hashlib.md5(src.encode()).hexdigest()[:16] + "." + ext
+        if numbered:
+            name = f"{idx:02d}.{ext}"  # 用位置编号,某张下载失败也不会错位
+        else:
+            name = hashlib.md5(src.encode()).hexdigest()[:16] + "." + ext
         (img_dir / name).write_bytes(r.content)
 
         img["src"] = f"{rel_prefix}/{name}"
@@ -192,21 +316,26 @@ def download(url, outdir, formats, full):
     if not meta["title"]:
         raise RuntimeError("解析不到标题,页面结构可能已变化")
     print(f"      标题: {meta['title']}")
-    print(f"      公众号: {meta['account']}  发布: {meta['publish_time']}")
 
     content = soup.select_one("#js_content")
-    if content is None:
+    if content is not None:
+        # 正文默认 visibility:hidden,靠 JS 显示,离线要去掉
+        content.attrs.pop("style", None)
+        content.attrs.pop("visibility", None)
+    elif PICTURE_LIST_KEY in html:
+        content = build_picture_content(soup, html, meta)
+        print(f"      图片消息: 正文在 {meta['image_count']} 张图片里,需要文字时请对图片做 OCR")
+    else:
         raise RuntimeError("找不到正文容器 #js_content")
-    # 正文默认 visibility:hidden,靠 JS 显示,离线要去掉
-    content.attrs.pop("style", None)
-    content.attrs.pop("visibility", None)
+
+    print(f"      公众号: {meta['account']}  发布: {meta['publish_time']}")
 
     workdir = Path(outdir) / safe_name(meta["title"])
     workdir.mkdir(parents=True, exist_ok=True)
 
     if full:
         print("[2/4] 下载图片 …")
-        n = localize_images(content, workdir / "images")
+        n = localize_images(content, workdir / "images", numbered=meta["type"] == "picture")
         print(f"      共 {n} 张,已本地化")
     else:
         print("[2/4] 跳过图片下载(未指定 --full)…")
