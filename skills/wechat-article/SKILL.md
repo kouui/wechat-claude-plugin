@@ -25,6 +25,15 @@ Files are written under the **current working directory** (where the command run
 - `--full` is tens of times larger than text only. Use it only when the user needs offline reading.
 - `--format html,md` selects the formats and only applies with `--full`.
 - Exit code 1 and a one-line reason on stderr on failure.
+- `meta.json` has `type`: `"article"` for a normal article, `"picture"` for a picture post.
+
+## Picture posts (图片消息)
+
+Some links are picture posts: a carousel of images with a short caption and no article body. The script detects them and prints `图片消息: 正文在 N 张图片里`.
+
+- `index.md` holds the caption and the images in order. `meta.json` also has `image_count`.
+- With `--full`, images are saved as `images/01.jpeg`, `images/02.jpeg`, … in carousel order.
+- The text is only in the images. If the user needs the text, download with `--full` and transcribe (OCR) the images in order.
 
 ## Failure causes
 

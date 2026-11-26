@@ -25,6 +25,8 @@ uv run skills/wechat-article/scripts/download_wechat_article.py "https://mp.weix
 
 Output goes to the directory you run the command from: `./<title>/index.md` and `meta.json`.
 
+Picture posts (图片消息, an image carousel with no article body) are supported too: `index.md` lists the images in order, and `--full` saves them as `images/01.jpeg`, `images/02.jpeg`, …
+
 ## Layout
 
 ```text
