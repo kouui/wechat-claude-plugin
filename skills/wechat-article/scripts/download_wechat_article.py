@@ -82,12 +82,27 @@ def fetch_html(url, retries=3):
 PICTURE_LIST_KEY = "picture_page_info_list: ["
 
 
+JS_ESCAPE_RE = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)", re.S)
+JS_SIMPLE_ESCAPES = {"n": "\n", "r": "", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+
+
 def js_unescape(s):
-    """还原内联 JS 单引号字符串里的转义(\\xHH / \\uHHHH / \\' 等)"""
-    s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
-    s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
-    s = s.replace("\\n", "\n").replace("\\r", "")
-    return re.sub(r"\\(.)", r"\1", s)
+    """还原内联 JS 单引号字符串里的转义(\\xHH / \\uHHHH / \\n / \\' 等)
+
+    每个转义只解码一次,所以 \\x5cn 得到的是反斜杠加 n,不会再被当成换行。
+    \\uD83D\\uDE00 这样的 UTF-16 代理对会合成一个字符(😀),
+    否则写 UTF-8 文件时会因孤立代理字符报 UnicodeEncodeError。
+    """
+
+    def one(m):
+        e = m.group(1)
+        if e[0] in "xu" and len(e) > 1:
+            return chr(int(e[1:], 16))
+        return JS_SIMPLE_ESCAPES.get(e, e)
+
+    s = JS_ESCAPE_RE.sub(one, s)
+    # 合成代理对;残留的孤立代理字符换成 U+FFFD
+    return s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
 
 def js_str(html, key):
@@ -216,6 +231,9 @@ def localize_images(content, img_dir: Path, rel_prefix="images", numbered=False)
             r.raise_for_status()
         except Exception as e:
             print(f"  [warn] 图片下载失败 {src[:60]}... ({e})", file=sys.stderr)
+            # 保留远程地址:离线 HTML 没有懒加载 JS,只有 data-src 的图片显示不出来
+            img["src"] = src
+            img.attrs.pop("data-src", None)
             continue
 
         # 从 wx_fmt 参数或 Content-Type 推断扩展名
